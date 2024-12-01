@@ -1,0 +1,89 @@
+name: CI/CD Pipeline for GKE Deployment
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+ lint_and_test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up Node.js (for example, if using a Node.js-based service)
+        uses: actions/setup-node@v2
+        with:
+          node-version: '16'
+
+      - name: Install dependencies
+        run: npm install  # Modify this according to your project’s dependency manager
+
+      - name: Run Linter
+        run: npm run lint  # Assuming you have a lint script in package.json (or modify as needed)
+
+      - name: Run Tests
+        run: npm test  # Assuming you have a test script in package.json
+ build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Log in to Google Cloud
+        uses: google-github-actions/auth@v0
+        with:
+          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+
+      - name: Configure Docker to use Google Cloud credentials
+        run: |
+            gcloud auth configure-docker gcr.io
+
+      - name: Build Docker image
+        run: |
+            docker build -t  gcr.io/${{ vars.PROJECT_ID }}/my-microservice:${{ github.sha }} .
+
+      - name: Install Trivy
+        run: |
+            curl -sSL https://github.com/aquasecurity/trivy/releases/download/v0.29.0/trivy_0.29.0_Linux-64bit.tar.gz | tar -xz -C /usr/local/bin
+
+      - name: Scan Docker image with Trivy
+        run: |
+            trivy image gcr.io/${{ vars.PROJECT_ID }}/my-microservice:${{ github.sha }}
+
+      - name: Push Docker image to GCR
+        run: |
+            docker push gcr.io/${{ vars.PROJECT_ID }}/my-microservice:${{ github.sha }}
+
+ deploy:
+    runs-on: ubuntu-latest
+    needs: [lint_and_test, build]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v0
+        with:
+          project_id: ${{ vars.PROJECT_ID }}
+
+      - name: Configure gcloud with kubectl
+        run: |
+          gcloud container clusters get-credentials my-gke-cluster --zone us-central1-a --project ${{ vars.PROJECT_ID }}
+
+      - name: Set up ArgoCD
+        run: |
+          curl -sSL https://github.com/argoproj/argo-cd/releases/download/v2.8.0/argocd-linux-amd64 -o /usr/local/bin/argocd
+          chmod +x /usr/local/bin/argocd
+
+      - name: Log into ArgoCD
+        run: |
+          argocd login argocd.example.com --username ${{ secrets.ARGOCD_USERNAME }} --password ${{ secrets.ARGOCD_PASSWORD }} --insecure
+
+      - name: Sync with ArgoCD
+        run: |
+          argocd app sync my-microservice --revision ${{ github.sha }} --prune
